@@ -122,6 +122,5 @@ site:
           title: Token Issuers
           path: token-issuers
           default: true
-          draft: true
           content:
             directory: ./token-issuers
