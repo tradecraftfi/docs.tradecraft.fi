@@ -28,47 +28,56 @@ Each of these is confirmed on the introductory call. Several can be in progress 
 | Minimum liquidity   | $150,000 total value locked in the first pool, split evenly: $75,000 of the token and $75,000 of CC. Liquidity can come from the issuer, the issuer’s liquidity providers, or both.                                 |
 | Token icon          | A square icon for the token, used in the Tradecraft interface and by integrated wallets.                                                                                                                            |
 
+{% hint style="info" %}
 **There is no listing fee.** The only capital requirement is the liquidity in the pool, which remains in the control of whoever deposited it.
+{% endhint %}
 
 ## The listing process <a href="#process" id="process"></a>
 
 Every listing follows the same six steps. Pool creation takes one to two days once Tradecraft has the token and icon; the overall timeline is usually set by how quickly liquidity is ready.
 
-1.  ### Introductory call
+{% stepper %}
+{% step %}
+### Introductory call (both teams)
 
-    Both teams
+Tradecraft and the issuer walk through the token, the timeline, and the terms on this page. The issuer should be ready to cover:
 
-    Tradecraft and the issuer walk through the token, the timeline, and the terms on this page. The issuer should be ready to cover:
+* Whether the token is live on Canton
+* The price-feed source
+* Current and upcoming exchange listings
+* Audit status, and bridge security documentation if the token is bridged
+{% endstep %}
 
-    * Whether the token is live on Canton
-    * The price-feed source
-    * Current and upcoming exchange listings
-    * Audit status, and bridge security documentation if the token is bridged
-2.  ### Agree terms and sign
+{% step %}
+### Agree terms and sign
 
-    Both teams
+Both sides agree on the commercial terms and the liquidity commitment, and sign the agreement.
+{% endstep %}
 
-    Both sides agree on the commercial terms and the liquidity commitment, and sign the agreement.
-3.  ### Shared Slack channel
+{% step %}
+### Shared Slack channel
 
-    Tradecraft
+Tradecraft opens a channel with the stakeholders from both teams. Everything from this point happens there: receiving addresses, test results, and announcement timing.
+{% endstep %}
 
-    Tradecraft opens a channel with the stakeholders from both teams. Everything from this point happens there: receiving addresses, test results, and announcement timing.
-4.  ### Pool creation
+{% step %}
+### Pool creation
 
-    IssuerTradecraft
+The issuer sends roughly $10 worth of the token and the token icon to the address shared in Slack. Tradecraft’s engineering team creates the TOKEN/CC pool and its pool address and runs a test transaction against it. This takes one to two days.
+{% endstep %}
 
-    The issuer sends roughly $10 worth of the token and the token icon to the address shared in Slack. Tradecraft’s engineering team creates the TOKEN/CC pool and its pool address and runs a test transaction against it. This takes one to two days.
-5.  ### Seed the pool
+{% step %}
+### Seed the pool
 
-    Issuer
+The issuer or its liquidity providers deposit the initial liquidity. Once the $150,000 minimum is met, Tradecraft runs a swap test and opens the pool publicly.
+{% endstep %}
 
-    The issuer or its liquidity providers deposit the initial liquidity. Once the $150,000 minimum is met, Tradecraft runs a swap test and opens the pool publicly.
-6.  ### Go live
+{% step %}
+### Go live
 
-    Both teams
-
-    Tradecraft and the issuer coordinate the public announcement, and Tradecraft’s inventory-provision bot and partner market makers begin trading the pool.
+Tradecraft and the issuer coordinate the public announcement, and Tradecraft’s inventory-provision bot and partner market makers begin trading the pool.
+{% endstep %}
+{% endstepper %}
 
 ## Issuer rewards <a href="#economics" id="economics"></a>
 
@@ -86,7 +95,7 @@ Tradecraft can provide issuers with inventory-providing assistance: Tradecraft r
 
 ## Meeting the liquidity minimum <a href="#lps" id="lps"></a>
 
-Issuers that need help meeting the listing minimum can ask Tradecraft for introductions to liquidity providers it works with. Participation is not guaranteed: providers decide independently, and they will want to see the token’s audit first. See [How to Provide Liquidity](https://docs.tradecraft.fi/using-tradecraft/guide-how-to-provide-liquidity) for how deposits work.
+Issuers that need help meeting the listing minimum can ask Tradecraft for introductions to liquidity providers it works with. Participation is not guaranteed: providers decide independently, and they will want to see the token’s audit first. See [Guide: How to Provide Liquidity](https://app.gitbook.com/s/dF47DwfCAGYAD1QW2BrD/guide-how-to-provide-liquidity "mention") for how deposits work.
 
 ## Frequently asked <a href="#faq" id="faq"></a>
 
@@ -115,5 +124,3 @@ Prospective issuers can email [partnerships@tradecraft.fi](mailto:partnerships@t
 * Current or upcoming exchange listings
 * Audit status, plus bridge security documentation if the token is bridged
 * Expected liquidity and target listing date
-
-[Email the partnerships team](mailto:partnerships@tradecraft.fi?subject=Listing%20a%20token%20on%20Tradecraft)
