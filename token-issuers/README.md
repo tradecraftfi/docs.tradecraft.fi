@@ -1,6 +1,10 @@
-# Listing a token on Tradecraft
+---
+description: >-
+  What asset issuers need to list a CIP-56 token on Tradecraft and seed its
+  first pool.
+---
 
-What asset issuers need to list a CIP-56 token on Tradecraft and seed its first pool.
+# Listing a token on Tradecraft
 
 Tradecraft is the largest decentralized exchange on Canton by total value locked and asset volume. Tradecraft does not issue tokens; it lists them. The issuer brings the token and liquidity, and Tradecraft brings the market makers, inventory providers, and trading volume that turn a pool into a market.
 
