@@ -114,6 +114,7 @@ site:
       key: section-8
       title: Token Issuers
       path: token-issuers
+      description: ""
       icon: coin-blank
       children:
         - type: space
