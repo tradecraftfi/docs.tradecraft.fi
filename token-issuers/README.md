@@ -42,7 +42,7 @@ Every listing follows the same six steps. Pool creation takes one to two days on
 
 {% stepper %}
 {% step %}
-### Introductory call (both teams)
+### Introductory call
 
 Tradecraft and the issuer walk through the token, the timeline, and the terms on this page. The issuer should be ready to cover:
 
