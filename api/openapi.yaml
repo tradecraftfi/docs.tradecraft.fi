@@ -5,7 +5,7 @@ info:
     REST API for interacting with the Tradecraft Exchange.
     Provides endpoints for querying pool information, getting trade quotes, and
     calculating liquidity provider operations.
-  version: 1.28.0
+  version: 1.29.0
 
 servers:
   - url: https://api.tradecraft.fi/v1
@@ -646,27 +646,12 @@ paths:
         needs `AmuletRules` and a current `OpenMiningRound`. Read those from
         the Splice Scan API per submission.
 
-        Where enabled, a ticket costs an [x402](https://x402.org) v2 payment,
-        settled through FTP Tech's facilitator. The facilitator serves MainNet
-        only, so DevNet and TestNet do not charge. A request without a payment
-        gets a 402 whose `PAYMENT-REQUIRED` header lists the accepted prices,
-        one entry per token in `accepts` (see `X402PaymentRequired`).
-
-        To pay:
-
-        1. Pick one entry of `accepts`.
-        2. As an external party, sign a token-standard `TransferFactory_Transfer`
-           of exactly `amount` of `extra.instrumentId` to `payTo`. `amount` is an
-           integer in units of 10^-10 of the token, so "100000000" is 0.01.
-           The facilitator, `extra.feePayer`, submits the transfer and pays its
-           traffic. The transfer must execute within `extra.executeBeforeSeconds`.
-        3. Send the same request again with the x402 v2 payment payload, as
-           Base64 JSON, in `PAYMENT-SIGNATURE`.
-
-        The payment settles only once the ticket is built, so an error costs
-        nothing. One settled payment buys one ticket: a payment sent again
-        gets a 402. If the facilitator gives no usable answer, the answer is
-        a 502: retry with the same payment, never a new one.
+        Where enabled, a ticket costs an [x402](https://x402.org) payment.
+        A request without one gets a 402 whose `PAYMENT-REQUIRED` header
+        lists the accepted prices. Retry with the signed payment in
+        `PAYMENT-SIGNATURE`. The payment settles only once the ticket is
+        built, so an error costs nothing. If the facilitator cannot be
+        reached, the answer is a 502: retry with the same payment.
       operationId: getSwapTicket
       tags:
         - Swaps
@@ -677,7 +662,7 @@ paths:
           description: |
             Base64 JSON of an x402 v2 payment payload: a signed
             `TransferFactory_Transfer` paying one entry of the 402's
-            `accepts`. Its `accepted` field is that entry.
+            `accepts`.
           schema:
             type: string
         - name: in
@@ -725,7 +710,7 @@ paths:
           description: Swap ticket
           headers:
             PAYMENT-RESPONSE:
-              description: Base64 JSON of the settlement (`X402Settlement`), including the ledger `transaction` id. Sent when a payment settled.
+              description: Base64 JSON of the settlement, including the ledger `transaction` id. Sent when a payment settled.
               schema:
                 type: string
           content:
@@ -743,14 +728,13 @@ paths:
                 $ref: "#/components/schemas/Error"
         "402":
           description: |
-            Payment required. Either none was sent, it is not in an accepted
-            token, the facilitator refused it (for example a wrong amount or
-            payee), or it already bought a ticket (`payment_already_redeemed`).
-            `error` and the header both say which.
+            Payment required. Either none was sent, it does not match a
+            current price, or the facilitator refused it. `error` and the
+            header both say which.
           headers:
             PAYMENT-REQUIRED:
               required: true
-              description: Base64 JSON of the x402 v2 payment requirements (`X402PaymentRequired`), with the accepted prices in `accepts`.
+              description: Base64 JSON of the x402 v2 payment requirements, with the accepted prices in `accepts`.
               schema:
                 type: string
           content:
@@ -760,10 +744,8 @@ paths:
         "502":
           description: |
             The payment facilitator gave no usable answer, so no ticket is
-            returned. This includes no reply, an error status such as its rate
-            limit, and a settlement without a transaction id. The payment may
-            have settled: retry with the same `PAYMENT-SIGNATURE`, not a new
-            payment, which could pay twice.
+            returned. The payment may have settled: retry with the same
+            `PAYMENT-SIGNATURE`, not a new payment, which could pay twice.
           content:
             application/json:
               schema:
@@ -771,8 +753,545 @@ paths:
         "503":
           description: |
             The pool exists, but the endpoint cannot build a ticket for it
-            now, or no payment token in the price list is in the token
-            registry.
+            now, or none of its priced tokens is currently available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/pools:
+    get:
+      summary: List all V7 liquidity pools
+      description: Returns all active V7 AMM pools with their current state.
+      operationId: listPoolsV7
+      tags:
+        - Pools
+      responses:
+        "200":
+          description: List of V7 AMM pools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V7Pool"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/pools/{token1}/{token2}/price:
+    get:
+      summary: Get V7 pool price
+      description: |
+        Returns a V7 pool's current price, in token2 per token1, as a
+        scale-10 decimal string. `token1` and `token2` must be in the pool's
+        order.
+      operationId: getPoolPriceV7
+      tags:
+        - Pools
+      parameters:
+        - name: token1
+          in: path
+          required: true
+          description: Instrument id of the pool's first instrument.
+          schema:
+            type: string
+            example: "BTC"
+        - name: token2
+          in: path
+          required: true
+          description: Instrument id of the pool's second instrument.
+          schema:
+            type: string
+            example: "USDC"
+      responses:
+        "200":
+          description: Pool price
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolPriceV7Response"
+        "400":
+          description: Wrong token order or price math error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No V7 pool found for the given token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error computing the price
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/swap/quote/{inputToken}/{outputToken}:
+    get:
+      summary: Get V7 concentrated-liquidity swap quote
+      description: |
+        Computes an exact-input swap quote for a V7 concentrated-liquidity pool.
+        Given an input token, an output token, and an input amount, returns how
+        much output the caller would receive at the current pool state.
+
+        The quote runs the full tick-traversal math against a live snapshot of
+        the pool fetched from Apollo, so the result reflects the current sqrt
+        price, active liquidity, and all initialized tick shards.
+
+        `amount` is a scale-10 decimal string. Whole numbers ("100") and
+        decimals ("100.5") are both accepted; the engine pads to ten decimal
+        places internally.
+
+        `partial` is true when the pool ran out of liquidity before the full
+        input was consumed. In that case `remaining` reports the unconsumed
+        portion and `input` reflects what was actually swapped.
+      operationId: getSwapQuoteV7
+      tags:
+        - Quotes
+      parameters:
+        - name: inputToken
+          in: path
+          required: true
+          description: Instrument id of the token being sold (e.g. "USDC", "BTC").
+          schema:
+            type: string
+            example: "USDC"
+        - name: outputToken
+          in: path
+          required: true
+          description: Instrument id of the token being bought (e.g. "BTC", "ETH").
+          schema:
+            type: string
+            example: "BTC"
+        - name: amount
+          in: query
+          required: true
+          description: |
+            Amount of the input token to sell, as a scale-10 decimal string.
+            Examples: "100", "100.5", "0.0001".
+          schema:
+            type: string
+            example: "100"
+      responses:
+        "200":
+          description: Swap quote result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SwapQuoteV7Response"
+        "400":
+          description: Invalid parameters, pool not found, or quote math error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No V7 pool found for the given token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error fetching pool state or computing the quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/swap/history/{actor}:
+    get:
+      summary: Get one page of a party's V7 swap history
+      description: |
+        Lists the V7 swap orders of one party from Apollo, newest first.
+        Each entry has the order's current status. The amounts exist only
+        for a settled or settling swap.
+
+        Without `after`, the page starts at the newest swap. With `after`,
+        it starts after the named order. `next` names the last order of the
+        page when an older page exists.
+      operationId: getSwapHistoryV7
+      tags:
+        - Swaps
+      parameters:
+        - name: actor
+          in: path
+          required: true
+          description: The party that placed the orders.
+          schema:
+            type: string
+            example: "trader::1220abcd"
+        - name: limit
+          in: query
+          required: false
+          description: Page size, from 1 to 100. The default is 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: after
+          in: query
+          required: false
+          description: Contract id of the last order of the previous page.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of swaps
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SwapHistoryV7Response"
+        "400":
+          description: Invalid limit, or an after value that names no swap order of the party
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error reading the swap history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/deposit/quote/{token1}/{token2}:
+    get:
+      summary: Get V7 concentrated-liquidity deposit quote
+      description: |
+        Quotes the largest deposit into a V7 pool whose fixed amount does not
+        exceed the request, at the current pool state.
+
+        The returned ticks are the narrowest range aligned to the pool's tick
+        spacing that contains both prices. Both amounts are rounded up, as the
+        pool debits them.
+
+        `token1` and `token2` must be in the pool's order. Prices are token2
+        per token1. Give exactly one of `amount1` and `amount2`. All values are
+        scale-10 decimal strings.
+      operationId: getDepositQuoteV7
+      tags:
+        - Liquidity
+      parameters:
+        - name: token1
+          in: path
+          required: true
+          description: Instrument id of the pool's first instrument.
+          schema:
+            type: string
+            example: "BTC"
+        - name: token2
+          in: path
+          required: true
+          description: Instrument id of the pool's second instrument.
+          schema:
+            type: string
+            example: "USDC"
+        - name: minPrice
+          in: query
+          required: true
+          description: Lowest price of the range, in token2 per token1.
+          schema:
+            type: string
+            example: "60000"
+        - name: maxPrice
+          in: query
+          required: true
+          description: Highest price of the range, in token2 per token1.
+          schema:
+            type: string
+            example: "65000"
+        - name: amount1
+          in: query
+          required: false
+          description: Amount of token1 to deposit.
+          schema:
+            type: string
+            example: "0.5"
+        - name: amount2
+          in: query
+          required: false
+          description: Amount of token2 to deposit.
+          schema:
+            type: string
+            example: "30000"
+      responses:
+        "200":
+          description: Deposit quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepositQuoteV7Response"
+        "400":
+          description: Invalid parameters, wrong token order, or quote math error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No V7 pool found for the given token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error fetching pool state or computing the quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/positions/{owner}:
+    get:
+      summary: List a party's V7 positions
+      description: |
+        Lists the owner's live V7 positions, by pool then tick range. Each
+        position carries what a full withdrawal pays at the current pool
+        state, and its owed fees.
+      operationId: getPositionsV7
+      tags:
+        - Liquidity
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          description: The party that owns the positions.
+          schema:
+            type: string
+            example: "lp::1220abcd"
+      responses:
+        "200":
+          description: The owner's positions; empty when there are none
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PositionsV7Response"
+        "400":
+          description: Malformed owner
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error listing or valuing the positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/disclosures/factories:
+    get:
+      summary: List V7 order factories
+      description: |
+        Returns the venue's V7 order factories, one per pool. An order
+        submission discloses the factory of its pool.
+      operationId: listFactoriesV7
+      tags:
+        - Liquidity
+      responses:
+        "200":
+          description: V7 order factories with their disclosures
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V7FactoryDisclosure"
+
+  /v7/tape:
+    get:
+      summary: Get the regulated trading tape
+      description: |
+        Transactions and daily pool data of the last 30 days, for pools that
+        pair a configured stablecoin (quote) with a configured regulated token
+        (base). Data may be up to ten minutes behind the current time.
+
+        `from` defaults to `to - 30 days` and `to` to now; the window is
+        half-open and `window` reports what was served. Pool and daily arrays
+        cover every qualifying pool of the window. Trades are ordered by
+        ascending ledger offset and order contract id; a response with
+        `nextCursor` has more. The cursor defines its window and never
+        expires; if the pool and token list changed it is refused with 409.
+      operationId: getV7Tape
+      tags:
+        - Trades
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Start of the window, inclusive, RFC3339 UTC.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: End of the window, exclusive, RFC3339 UTC, at most 30 days after `from`.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Number of trades on this page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 500
+        - name: cursor
+          in: query
+          required: false
+          description: The `nextCursor` of the previous page.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of the tape
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V7TapeResponse"
+        "400":
+          description: Invalid window, limit or cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The pool and token list changed since the cursor was issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The ledger index cannot answer this request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/transfer-instructions/{cid}/accept-context:
+    get:
+      summary: Get the accept choice context for a transfer instruction
+      description: |
+        Fetches the instrument registry's choice context for exercising
+        TransferInstruction_Accept on a pending CIP-56 transfer instruction,
+        and returns it unchanged.
+
+        Pass `choiceContextData` as `ExtraArgs.context` and submit with
+        `disclosedContracts`. The context is not cached, so request it just
+        before submitting.
+      operationId: getTransferInstructionAcceptContext
+      tags:
+        - Wallet
+      parameters:
+        - name: cid
+          in: path
+          required: true
+          description: Contract ID of the pending transfer instruction (hex).
+          schema:
+            type: string
+            pattern: "^[0-9a-fA-F]+$"
+        - name: admin
+          in: query
+          required: true
+          description: The instrument's admin party.
+          schema:
+            type: string
+            example: "party::admin123"
+        - name: id
+          in: query
+          required: true
+          description: The instrument's id.
+          schema:
+            type: string
+            example: "USDCx"
+      responses:
+        "200":
+          description: The registry's accept choice context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferInstructionAcceptContext"
+        "400":
+          description: The contract id, admin or id is missing or malformed, or the instrument is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: The registry no longer has the transfer instruction, because it was accepted or withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The registry did not return a context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v7/orders/holdings:
+    post:
+      summary: Record the funding holdings of newly placed V7 orders
+      description: |
+        After a wallet submission creates V7 orders funded with
+        FundingHoldings, post the submission's update id with the created
+        event of every funding holding. The API waits up to 30 seconds for
+        the orders to appear in Apollo, checks that one of them names each
+        holding, and stores the holdings. The venue discloses them when it
+        executes the orders: a holding issued on another participant is
+        otherwise invisible to the venue.
+
+        The reply lists every order of the update. An order that no holding
+        funds, such as a withdraw, posts an empty list to get its order id.
+
+        Posting the same holdings again replaces the stored rows.
+      operationId: postOrderHoldingsV7
+      tags:
+        - Orders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderHoldingsRequest"
+      responses:
+        "200":
+          description: The holdings were stored. Every order of the update is listed with its holdings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderHoldingsResponse"
+        "400":
+          description: Malformed body, a duplicated holding, or a holding no order of the update names
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No live order created by the update appeared within the wait
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Reading the orders from Apollo failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The holding tracker or Apollo is not configured or not reachable
           content:
             application/json:
               schema:
@@ -809,6 +1328,172 @@ components:
         example: "USDCx"
 
   schemas:
+    V7TapeResponse:
+      type: object
+      required: [window, readOffset, selectionHash, pools, daily, trades]
+      properties:
+        window:
+          type: object
+          required: [from, to]
+          properties:
+            from:
+              type: string
+              format: date-time
+            to:
+              type: string
+              format: date-time
+              description: The exclusive data cutoff of this traversal.
+        readOffset:
+          type: string
+          nullable: true
+          description: Greatest committed ledger offset at or before the window end; null when nothing is public yet.
+        selectionHash:
+          type: string
+          description: The pool and token list this response was built with.
+        pools:
+          type: array
+          items:
+            $ref: "#/components/schemas/V7TapePool"
+        daily:
+          type: array
+          items:
+            $ref: "#/components/schemas/V7TapeDaily"
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/V7TapeTrade"
+        nextCursor:
+          type: string
+          description: Continuation handle for the next page of trades.
+    V7TapeInstrument:
+      type: object
+      required: [admin, id, symbol]
+      properties:
+        admin:
+          type: string
+        id:
+          type: string
+        symbol:
+          type: string
+    V7TapePoolRef:
+      type: object
+      required: [venue, vault, ammId]
+      properties:
+        venue:
+          type: string
+        vault:
+          type: string
+        ammId:
+          type: string
+    V7TapeSize:
+      type: object
+      required: [ammContractId, baseAmount, quoteAmount, usdValue, transactionId, ledgerOffset, time]
+      properties:
+        ammContractId:
+          type: string
+        baseAmount:
+          type: string
+        quoteAmount:
+          type: string
+        usdValue:
+          type: string
+          description: The reserves marked at the pool's state price.
+        transactionId:
+          type: string
+        ledgerOffset:
+          type: string
+        time:
+          type: string
+          format: date-time
+    V7TapePool:
+      type: object
+      required: [pool, baseInstrument, quoteInstrument, securityId, displayLabel, sharesPerToken, asOfSize]
+      properties:
+        pool:
+          $ref: "#/components/schemas/V7TapePoolRef"
+        baseInstrument:
+          $ref: "#/components/schemas/V7TapeInstrument"
+        quoteInstrument:
+          $ref: "#/components/schemas/V7TapeInstrument"
+        securityId:
+          type: string
+        displayLabel:
+          type: string
+        sharesPerToken:
+          type: string
+        asOfSize:
+          allOf:
+            - $ref: "#/components/schemas/V7TapeSize"
+          nullable: true
+          description: Null before the pool existed and after it closed.
+    V7TapeDaily:
+      type: object
+      required: [pool, day, windowStart, windowEnd, inProgress, tradeCount, tokenVolume, shareVolume, usdVolume, eodSize]
+      properties:
+        pool:
+          $ref: "#/components/schemas/V7TapePoolRef"
+        day:
+          type: string
+          description: The UTC day, as YYYY-MM-DD.
+        windowStart:
+          type: string
+          format: date-time
+        windowEnd:
+          type: string
+          format: date-time
+        inProgress:
+          type: boolean
+          description: True when the interval ends before the UTC day does.
+        tradeCount:
+          type: integer
+        tokenVolume:
+          type: string
+        shareVolume:
+          type: string
+        usdVolume:
+          type: string
+        eodSize:
+          allOf:
+            - $ref: "#/components/schemas/V7TapeSize"
+          nullable: true
+          description: Null while the day end is not public yet or the pool had closed.
+    V7TapeTrade:
+      type: object
+      required: [pool, transactionId, ledgerOffset, time, orderContractId, resultContractId, ammContractId, baseSymbol, quoteSymbol, direction, price, size, sizeShares, usdValue]
+      properties:
+        pool:
+          $ref: "#/components/schemas/V7TapePoolRef"
+        transactionId:
+          type: string
+        ledgerOffset:
+          type: string
+        time:
+          type: string
+          format: date-time
+        orderContractId:
+          type: string
+        resultContractId:
+          type: string
+        ammContractId:
+          type: string
+        baseSymbol:
+          type: string
+        quoteSymbol:
+          type: string
+        direction:
+          type: string
+          enum: [buy, sell]
+          description: Buy when the actor received the regulated token; sell for the reverse.
+        price:
+          type: string
+          description: Effective price of the recorded legs, USD per base token.
+        size:
+          type: string
+          description: Executed base-token quantity.
+        sizeShares:
+          type: string
+        usdValue:
+          type: string
     Error:
       type: object
       required:
@@ -1271,6 +1956,69 @@ components:
           type: string
           description: The synchronizer (domain) ID where this contract lives
 
+    OrderHoldingsRequest:
+      type: object
+      required:
+        - updateId
+        - holdings
+      properties:
+        updateId:
+          type: string
+          description: The update id the wallet returned for the submission
+          example: "1220f0e1d2c3b4a5968778695a4b3c2d1e0f1122334455667788990011223344"
+        holdings:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingHolding"
+
+    FundingHolding:
+      type: object
+      description: One holding a V7 order is funded with, as the ledger reported its creation.
+      required:
+        - contractId
+        - templateId
+        - createdEventBlob
+        - instrumentId
+      properties:
+        contractId:
+          type: string
+        templateId:
+          type: string
+          description: Template id in package-id form (64-hex packageId:moduleName:entityName)
+        createdEventBlob:
+          type: string
+          format: byte
+          description: Base64-encoded created event blob
+        synchronizerId:
+          type: string
+          description: The synchronizer the holding was created on, when the wallet reports it
+        instrumentId:
+          $ref: "#/components/schemas/InstrumentId"
+
+    OrderHoldingsResponse:
+      type: object
+      required:
+        - orders
+      properties:
+        orders:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderHoldings"
+
+    OrderHoldings:
+      type: object
+      description: One order of the update and the holdings stored for it.
+      required:
+        - orderCid
+        - holdingCids
+      properties:
+        orderCid:
+          type: string
+        holdingCids:
+          type: array
+          items:
+            type: string
+
     PoolDisclosuresResponse:
       type: object
       description: |
@@ -1310,6 +2058,23 @@ components:
           type: string
           nullable: true
           description: Contract ID of the FeaturedAppRight (if present)
+
+    TransferInstructionAcceptContext:
+      type: object
+      description: The registry's choice-context envelope, not a Daml ChoiceContext.
+      required:
+        - disclosedContracts
+        - choiceContext
+      properties:
+        disclosedContracts:
+          type: array
+          description: Disclosures for the submission, not for ExtraArgs
+          items:
+            $ref: "#/components/schemas/DisclosedContract"
+        choiceContext:
+          type: object
+          nullable: true
+          description: The Daml ChoiceContext to pass as ExtraArgs.context
 
     AllocationFactoryResponse:
       type: object
@@ -1435,129 +2200,464 @@ components:
         disclosures:
           $ref: "#/components/schemas/PoolDisclosuresResponse"
 
-    X402PaymentRequired:
+    SwapQuoteV7Response:
       type: object
-      description: |
-        The JSON in the `PAYMENT-REQUIRED` header of a 402 from `/swap-ticket`.
-        The header carries it as Base64.
       required:
-        - x402Version
-        - error
-        - resource
-        - accepts
+        - input
+        - output
+        - feeAmount
+        - remaining
+        - partial
+        - state
+        - tickUpdates
+        - debit
+        - credit
+        - fee
       properties:
-        x402Version:
-          type: integer
-          example: 2
-        error:
+        input:
           type: string
-          description: Why payment is required. The body's `error` is the same text.
-          example: "PAYMENT-SIGNATURE header required"
-        resource:
-          type: object
-          properties:
-            url:
-              type: string
-              format: uri
-              description: The ticket URL, with the request's query
-              example: "https://api.tradecraft.fi/v1/swap-ticket?in=CC&out=USDCx&amount=100&slippage=0.005"
-            description:
-              type: string
-              example: "Everything needed to place one swap"
-            mimeType:
-              type: string
-              example: "application/json"
-        accepts:
+          description: Settled input amount including fees, as a scale-10 decimal string.
+          example: "100.0000000000"
+        output:
+          type: string
+          description: Settled output amount, as a scale-10 decimal string.
+          example: "99.7012345678"
+        feeAmount:
+          type: string
+          description: Total LP and protocol fee charged, as a scale-20 raw decimal string.
+          example: "0.30000000000000000000"
+        remaining:
+          type: string
+          description: |
+            Unconsumed input, as a scale-20 raw decimal string. Non-zero only
+            when the pool ran out of liquidity before the full input was swapped.
+          example: "0.00000000000000000000"
+        partial:
+          type: boolean
+          description: True when remaining > 0, meaning the swap was only partially filled.
+          example: false
+        state:
+          $ref: "#/components/schemas/V7PoolState"
+        tickUpdates:
           type: array
-          description: One entry per token you can pay in
+          description: Tick states that changed during the swap (crossed ticks with updated fee growth).
           items:
-            $ref: "#/components/schemas/X402Requirements"
-        extensions:
-          type: object
+            $ref: "#/components/schemas/V7TickUpdate"
+        debit:
+          type: string
+          description: Total the trader pays, including an operator fee on the input leg, as a scale-10 decimal string.
+          example: "100.0000000000"
+        credit:
+          type: string
+          description: Net the trader receives, after an operator fee on the output leg, as a scale-10 decimal string.
+          example: "99.6015333333"
+        fee:
+          type: string
+          description: Operator fee charged, as a scale-10 decimal string. Zero when the pool has no single-instrument fee source.
+          example: "0.0997012345"
 
-    X402Requirements:
+    SwapHistoryV7Response:
       type: object
-      description: One way to pay for a ticket. Copy it into the payment payload's `accepted`.
       required:
-        - scheme
-        - network
-        - amount
-        - asset
-        - payTo
-        - maxTimeoutSeconds
-        - extra
+        - swaps
+        - next
       properties:
-        scheme:
+        swaps:
+          type: array
+          description: The page's swaps, newest first.
+          items:
+            $ref: "#/components/schemas/SwapHistoryV7Entry"
+        next:
           type: string
-          example: "exact"
-        network:
+          nullable: true
+          description: Contract id of the page's last order when an older page exists.
+
+    SwapHistoryV7Entry:
+      type: object
+      required:
+        - orderCid
+        - placedAt
+        - executedAt
+        - tokenIn
+        - tokenOut
+        - amountIn
+        - amountOut
+        - status
+        - reason
+        - updateId
+      properties:
+        orderCid:
           type: string
-          example: "canton:mainnet"
-        amount:
+          description: Contract id of the order.
+        placedAt:
           type: string
-          description: The price, as an integer in units of 10^-10 of the token
-          example: "100000000"
-        asset:
+          format: date-time
+        executedAt:
           type: string
-          description: Symbol of the token to pay in
-          example: "CC"
-        payTo:
+          format: date-time
+          nullable: true
+        tokenIn:
+          $ref: "#/components/schemas/InstrumentId"
+        tokenOut:
+          $ref: "#/components/schemas/InstrumentId"
+        amountIn:
           type: string
-          description: The party to pay
-          example: "payee::1220abcd..."
-        maxTimeoutSeconds:
+          nullable: true
+          example: "10.0"
+        amountOut:
+          type: string
+          nullable: true
+          example: "1.52"
+        status:
+          type: string
+          enum:
+            - pending
+            - completed
+            - failed
+            - cancelled
+        reason:
+          type: string
+          nullable: true
+          description: The rejection text of a failed swap.
+        updateId:
+          type: string
+          description: The update that set the current status.
+
+    V7Pool:
+      type: object
+      description: An active V7 AMM pool and its current state.
+      required:
+        - ammId
+        - instrument1
+        - instrument2
+        - tickSpacing
+        - sqrtPrice
+        - currentTick
+        - liquidity
+        - fee
+        - feeProtocol
+        - feeGrowthGlobal1
+        - feeGrowthGlobal2
+        - protocolFees1
+        - protocolFees2
+        - operatorFeeSource
+      properties:
+        ammId:
+          type: string
+        instrument1:
+          $ref: "#/components/schemas/InstrumentId"
+        instrument2:
+          $ref: "#/components/schemas/InstrumentId"
+        tickSpacing:
           type: integer
-          example: 120
-        extra:
+        sqrtPrice:
+          type: string
+          description: Square root of the pool price, scale-20.
+        currentTick:
+          type: integer
+        liquidity:
+          type: string
+          description: Active liquidity, scale-10.
+        fee:
+          type: string
+          description: LP fee rate, scale-10.
+        feeProtocol:
+          type: string
+          description: Protocol share of the fee, scale-10.
+        feeGrowthGlobal1:
+          type: string
+          description: Fee growth per unit of liquidity for instrument 1, scale-20.
+        feeGrowthGlobal2:
+          type: string
+          description: Fee growth per unit of liquidity for instrument 2, scale-20.
+        protocolFees1:
+          type: string
+          description: Accrued protocol fees for instrument 1, scale-20.
+        protocolFees2:
+          type: string
+          description: Accrued protocol fees for instrument 2, scale-20.
+        operatorFeeSource:
+          type: object
+          nullable: true
+          description: The pool's Daml operator fee source. Null when the pool has none.
+          required:
+            - tag
+          properties:
+            tag:
+              type: string
+              enum: [OperatorFeeInputCarve, OperatorFeeSingleInstrument]
+            value:
+              type: object
+              nullable: true
+              description: Present for OperatorFeeSingleInstrument.
+              required:
+                - instrument
+                - rate
+              properties:
+                instrument:
+                  $ref: "#/components/schemas/InstrumentId"
+                rate:
+                  type: string
+                  description: Fee rate, scale-10.
+
+    V7PoolState:
+      type: object
+      description: Pool state after the hypothetical swap.
+      required:
+        - sqrtPrice
+        - currentTick
+        - liquidity
+        - feeGrowthGlobal1
+        - feeGrowthGlobal2
+        - protocolFees1
+        - protocolFees2
+      properties:
+        sqrtPrice:
+          type: string
+          description: Square root of the new pool price, as a scale-20 decimal string.
+          example: "1.00004999875006249218"
+        currentTick:
+          type: integer
+          format: int64
+          description: Tick index corresponding to the new sqrt price.
+          example: -5
+        liquidity:
+          type: string
+          description: Active liquidity after the swap, as a scale-10 decimal string.
+          example: "1000000.0000000000"
+        feeGrowthGlobal1:
+          type: string
+          description: Cumulative fee growth per unit of liquidity for instrument 1, scale-20.
+          example: "0.00030000000000000000"
+        feeGrowthGlobal2:
+          type: string
+          description: Cumulative fee growth per unit of liquidity for instrument 2, scale-20.
+          example: "0.00000000000000000000"
+        protocolFees1:
+          type: string
+          description: Accrued protocol fees for instrument 1, scale-20.
+          example: "0.00000000000000000000"
+        protocolFees2:
+          type: string
+          description: Accrued protocol fees for instrument 2, scale-20.
+          example: "0.00000000000000000000"
+
+    V7TickUpdate:
+      type: object
+      description: Updated state of one tick crossed during the swap.
+      required:
+        - shardKey
+        - tick
+      properties:
+        shardKey:
+          type: integer
+          format: int64
+          description: Shard key of the tick's containing shard.
+          example: 0
+        tick:
           type: object
           required:
-            - assetTransferMethod
-            - feePayer
-            - instrumentId
-            - executeBeforeSeconds
+            - index
+            - liquidityGross
+            - liquidityNet
+            - feeGrowthOutside1
+            - feeGrowthOutside2
           properties:
-            assetTransferMethod:
-              type: string
-              example: "transfer-factory"
-            feePayer:
-              type: string
-              description: The facilitator party, which submits the transfer and pays its traffic
-              example: "ftp-x402-infrastructure::1220da86..."
-            synchronizerId:
-              type: string
-              example: "global-domain::1220b143..."
-            instrumentId:
-              $ref: "#/components/schemas/InstrumentId"
-            executeBeforeSeconds:
+            index:
               type: integer
-              description: How long the signed transfer stays valid
-              example: 120
+              format: int64
+              description: Tick index.
+              example: -10
+            liquidityGross:
+              type: string
+              description: Total liquidity referencing this tick, scale-10.
+              example: "500000.0000000000"
+            liquidityNet:
+              type: string
+              description: Liquidity delta when crossing this tick upward, scale-10.
+              example: "500000.0000000000"
+            feeGrowthOutside1:
+              type: string
+              description: Fee growth outside this tick for instrument 1, scale-20.
+              example: "0.00015000000000000000"
+            feeGrowthOutside2:
+              type: string
+              description: Fee growth outside this tick for instrument 2, scale-20.
+              example: "0.00000000000000000000"
 
-    X402Settlement:
+    PoolPriceV7Response:
+      type: object
+      description: A V7 pool's current price.
+      required:
+        - currentPrice
+      properties:
+        currentPrice:
+          type: string
+          description: Current pool price in token2 per token1, scale-10.
+          example: "62500.0000000000"
+
+    DepositQuoteV7Response:
+      type: object
+      description: A V7 deposit quote at the current pool state.
+      required:
+        - currentPrice
+        - tickLower
+        - tickUpper
+        - liquidity
+        - amount1
+        - amount2
+      properties:
+        currentPrice:
+          type: string
+          description: Current pool price in token2 per token1, scale-10.
+          example: "62500.0000000000"
+        tickLower:
+          type: integer
+          format: int64
+          description: Inclusive lower tick, aligned to the tick spacing.
+          example: 110400
+        tickUpper:
+          type: integer
+          format: int64
+          description: Exclusive upper tick, aligned to the tick spacing.
+          example: 111000
+        liquidity:
+          type: string
+          description: Liquidity to request in the deposit order, scale-10.
+          example: "1250.0000000000"
+        amount1:
+          type: string
+          description: Amount of token1 the pool debits, scale-10.
+          example: "0.5000000000"
+        amount2:
+          type: string
+          description: Amount of token2 the pool debits, scale-10.
+          example: "31000.0000000000"
+
+    PositionsV7Response:
+      type: object
+      required:
+        - positions
+      properties:
+        positions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PositionV7"
+
+    PositionV7:
       type: object
       description: |
-        The JSON in the `PAYMENT-RESPONSE` header of a 200 from `/swap-ticket`.
-        The header carries it as Base64.
+        One live V7 position, valued at its pool's current state. A pool,
+        owner and tick range identify it. Prices are instrument2 per
+        instrument1. All decimals are scale-10 strings.
       required:
-        - success
-        - payer
-        - transaction
-        - network
+        - ammId
+        - instrument1
+        - instrument2
+        - tickLower
+        - tickUpper
+        - liquidity
+        - priceLower
+        - priceUpper
+        - inRange
+        - amount1
+        - amount2
+        - fees1
+        - fees2
       properties:
-        success:
+        ammId:
+          type: string
+          example: "TC CNTN/OBUSD #883eb79f70af32b5823f585db8df4d8b-5 CL7"
+        instrument1:
+          $ref: "#/components/schemas/InstrumentId"
+        instrument2:
+          $ref: "#/components/schemas/InstrumentId"
+        tickLower:
+          type: integer
+          format: int64
+          description: Inclusive lower tick.
+          example: 110400
+        tickUpper:
+          type: integer
+          format: int64
+          description: Exclusive upper tick.
+          example: 111000
+        liquidity:
+          type: string
+          description: The position's liquidity, which a full withdrawal order names.
+          example: "1250.0000000000"
+        priceLower:
+          type: string
+          example: "62000.0000000000"
+        priceUpper:
+          type: string
+          example: "65000.0000000000"
+        inRange:
           type: boolean
-          example: true
-        payer:
+          description: Whether the current tick is inside the range.
+        amount1:
           type: string
-          description: The party that paid
-          example: "payer::1220abcd..."
-        transaction:
+          description: Amount of instrument1 a full withdrawal pays, rounded down.
+          example: "0.2500000000"
+        amount2:
           type: string
-          description: The ledger update id of the payment
-          example: "1220abcd..."
-        network:
+          description: Amount of instrument2 a full withdrawal pays, rounded down.
+          example: "15500.0000000000"
+        fees1:
           type: string
-          example: "canton:mainnet"
+          description: |
+            Owed instrument1 fees, including those accrued since the
+            position last changed, rounded down. A withdrawal does not pay
+            them. A collect after any withdrawal, even of zero liquidity,
+            pays all of them. A collect alone pays only the fees stored on
+            the position.
+          example: "0.0001000000"
+        fees2:
+          type: string
+          description: Owed instrument2 fees, as for fees1.
+          example: "6.2000000000"
+
+    V7FactoryDisclosure:
+      type: object
+      description: One pool's order factory, with the disclosure that an order submission needs.
+      required:
+        - pool
+        - tickSpacing
+        - contractId
+        - disclosure
+      properties:
+        pool:
+          $ref: "#/components/schemas/V7PoolRef"
+        tickSpacing:
+          type: integer
+          format: int64
+          example: 60
+        contractId:
+          type: string
+          description: The factory's contract ID.
+        disclosure:
+          $ref: "#/components/schemas/DisclosedContract"
+
+    V7PoolRef:
+      type: object
+      description: The pool reference of a V7 order.
+      required:
+        - venue
+        - vault
+        - ammId
+        - instrument1
+        - instrument2
+      properties:
+        venue:
+          type: string
+        vault:
+          type: string
+        ammId:
+          type: string
+        instrument1:
+          $ref: "#/components/schemas/InstrumentId"
+        instrument2:
+          $ref: "#/components/schemas/InstrumentId"
 
 tags:
   - name: Health
@@ -1576,3 +2676,7 @@ tags:
     description: Liquidity provider operations.
   - name: Swaps
     description: Everything needed to place a swap.
+  - name: Orders
+    description: Records about placed V7 orders.
+  - name: Trades
+    description: The public record of executed trades.
